@@ -34,12 +34,13 @@ func TestHooksSpecsAndCapability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(specs) != 2 {
+	if len(specs) != 3 {
 		t.Fatalf("specs = %#v", specs)
 	}
 	want := map[string]peggplugin.HookKind{
-		HookRunPrepare:    peggplugin.HookFilter,
-		HookCardSucceeded: peggplugin.HookAction,
+		HookRunPrepare:          peggplugin.HookFilter,
+		HookCardSucceeded:       peggplugin.HookAction,
+		HookChangeRequestRoutes: peggplugin.HookFilter,
 	}
 	for _, spec := range specs {
 		kind, ok := want[spec.Name]
@@ -398,6 +399,12 @@ func TestCardSucceededUnhandled(t *testing.T) {
 				payload.Worktree = nil
 			},
 		},
+		{
+			name: "routed to another provider",
+			mutate: func(_ *Settings, payload *CardSucceeded) {
+				payload.ChangeRequestProvider = "github"
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -591,5 +598,88 @@ func TestChangeRequestBranchAndBasePrecedence(t *testing.T) {
 	payload.Card.Worktree = nil
 	if got := changeRequestBranch(payload); got != "" {
 		t.Fatalf("branch after clearing worktrees = %q", got)
+	}
+}
+
+func TestChangeRequestRoutesHook(t *testing.T) {
+	plugin := &Plugin{settings: Settings{Enabled: true, IssueProviders: []string{"jira"}}}
+	result := executeHookT(t, plugin, HookChangeRequestRoutes, peggplugin.HookFilter, map[string]string{})
+	if !result.Handled {
+		t.Fatal("routes hook not handled")
+	}
+	var routes map[string]string
+	if err := json.Unmarshal(result.Value, &routes); err != nil {
+		t.Fatal(err)
+	}
+	if routes["jira"] != "bitbucket" {
+		t.Fatalf("routes = %#v", routes)
+	}
+
+	result = executeHookT(t, plugin, HookChangeRequestRoutes, peggplugin.HookFilter, map[string]string{"jira": "gitlab"})
+	if err := json.Unmarshal(result.Value, &routes); err != nil {
+		t.Fatal(err)
+	}
+	if routes["jira"] != "gitlab" {
+		t.Fatalf("existing route was overwritten: %#v", routes)
+	}
+
+	disabled := &Plugin{settings: Settings{Enabled: false, IssueProviders: []string{"jira"}}}
+	result = executeHookT(t, disabled, HookChangeRequestRoutes, peggplugin.HookFilter, map[string]string{})
+	if result.Handled {
+		t.Fatal("disabled plugin handled routes hook")
+	}
+}
+
+func TestRunPrepareRouting(t *testing.T) {
+	repo := initGitRepo(t)
+	plugin := &Plugin{settings: Settings{Enabled: true, WorktreeRoot: ".pegg-worktrees", DefaultBase: "main"}}
+
+	payload, _ := json.Marshal(RunPrepare{
+		Card:                  Card{ID: "card-abc", Title: "Fix login"},
+		Repo:                  repo,
+		BaseBranch:            "main",
+		ChangeRequestProvider: "github",
+		Context:               RunContext{Kind: "repo", Path: repo},
+	})
+	result, err := plugin.ExecuteHook(peggplugin.HookRequest{Name: HookRunPrepare, Value: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Handled {
+		t.Fatal("run.prepare should not be handled for another change request provider")
+	}
+
+	payload, _ = json.Marshal(RunPrepare{
+		Card:                  Card{ID: "card-abc", Title: "Fix login"},
+		Repo:                  repo,
+		BaseBranch:            "main",
+		ChangeRequestProvider: "bitbucket",
+		Context:               RunContext{Kind: "repo", Path: repo},
+	})
+	result, err = plugin.ExecuteHook(peggplugin.HookRequest{Name: HookRunPrepare, Value: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Handled {
+		t.Fatal("run.prepare should be handled for bitbucket")
+	}
+}
+
+func TestRunPrepareSkipsNonGitRepo(t *testing.T) {
+	dir := t.TempDir()
+	plugin := &Plugin{settings: Settings{Enabled: true, WorktreeRoot: ".pegg-worktrees", DefaultBase: "main"}}
+	payload, _ := json.Marshal(RunPrepare{
+		Card:                  Card{ID: "card-abc", Title: "Fix login"},
+		Repo:                  dir,
+		BaseBranch:            "main",
+		ChangeRequestProvider: "bitbucket",
+		Context:               RunContext{Kind: "repo", Path: dir},
+	})
+	result, err := plugin.ExecuteHook(peggplugin.HookRequest{Name: HookRunPrepare, Value: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Handled {
+		t.Fatal("run.prepare should be skipped for a non-git repository")
 	}
 }
