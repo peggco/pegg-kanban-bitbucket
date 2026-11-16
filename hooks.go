@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	HookRunPrepare    = "kanban.run.prepare"
-	HookCardSucceeded = "kanban.card.succeeded"
+	HookRunPrepare          = "kanban.run.prepare"
+	HookCardSucceeded       = "kanban.card.succeeded"
+	HookChangeRequestRoutes = "kanban.change_request.routes"
 
 	hookPriority = 10
 )
@@ -52,21 +53,23 @@ type RunContext struct {
 }
 
 type RunPrepare struct {
-	Card       Card       `json:"card"`
-	Repo       string     `json:"repo"`
-	BaseBranch string     `json:"base_branch,omitempty"`
-	Context    RunContext `json:"context"`
+	Card                  Card       `json:"card"`
+	Repo                  string     `json:"repo"`
+	BaseBranch            string     `json:"base_branch,omitempty"`
+	ChangeRequestProvider string     `json:"change_request_provider,omitempty"`
+	Context               RunContext `json:"context"`
 }
 
 type CardSucceeded struct {
-	Card                Card           `json:"card"`
-	Worktree            *WorktreeEntry `json:"worktree,omitempty"`
-	Context             *RunContext    `json:"context,omitempty"`
-	Summary             string         `json:"summary,omitempty"`
-	Feedback            bool           `json:"feedback"`
-	CreateChangeRequest bool           `json:"create_change_request"`
-	TransitionOnSuccess string         `json:"transition_on_success,omitempty"`
-	BaseBranch          string         `json:"base_branch,omitempty"`
+	Card                  Card           `json:"card"`
+	Worktree              *WorktreeEntry `json:"worktree,omitempty"`
+	Context               *RunContext    `json:"context,omitempty"`
+	Summary               string         `json:"summary,omitempty"`
+	Feedback              bool           `json:"feedback"`
+	CreateChangeRequest   bool           `json:"create_change_request"`
+	ChangeRequestProvider string         `json:"change_request_provider,omitempty"`
+	TransitionOnSuccess   string         `json:"transition_on_success,omitempty"`
+	BaseBranch            string         `json:"base_branch,omitempty"`
 }
 
 type pullRequestResult struct {
@@ -88,6 +91,12 @@ func (p *Plugin) Hooks() ([]peggplugin.HookSpec, error) {
 			Priority:    hookPriority,
 			Description: "Open a Bitbucket pull request after a Kanban card succeeds.",
 		},
+		{
+			Name:        HookChangeRequestRoutes,
+			Kind:        peggplugin.HookFilter,
+			Priority:    hookPriority,
+			Description: "Route issues from configured providers to Bitbucket pull requests.",
+		},
 	}, nil
 }
 
@@ -106,9 +115,40 @@ func executeHook(settings Settings, req peggplugin.HookRequest) (*peggplugin.Hoo
 		return hookRunPrepare(settings, req)
 	case HookCardSucceeded:
 		return hookCardSucceeded(settings, req)
+	case HookChangeRequestRoutes:
+		return hookChangeRequestRoutes(settings, req)
 	default:
 		return &peggplugin.HookResult{Handled: false}, nil
 	}
+}
+
+func hookChangeRequestRoutes(settings Settings, req peggplugin.HookRequest) (*peggplugin.HookResult, error) {
+	if !settings.Enabled {
+		return &peggplugin.HookResult{Handled: false}, nil
+	}
+	routes := map[string]string{}
+	if len(req.Value) > 0 && string(req.Value) != "null" {
+		if err := json.Unmarshal(req.Value, &routes); err != nil {
+			return nil, fmt.Errorf("decode %s payload: %w", HookChangeRequestRoutes, err)
+		}
+	}
+	if routes == nil {
+		routes = map[string]string{}
+	}
+	for _, provider := range settings.IssueProviders {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider == "" {
+			continue
+		}
+		if _, exists := routes[provider]; !exists {
+			routes[provider] = pluginName
+		}
+	}
+	value, err := json.Marshal(routes)
+	if err != nil {
+		return nil, fmt.Errorf("encode %s payload: %w", HookChangeRequestRoutes, err)
+	}
+	return &peggplugin.HookResult{Value: value, Handled: true}, nil
 }
 
 func hookRunPrepare(settings Settings, req peggplugin.HookRequest) (*peggplugin.HookResult, error) {
@@ -118,7 +158,7 @@ func hookRunPrepare(settings Settings, req peggplugin.HookRequest) (*peggplugin.
 			return nil, fmt.Errorf("decode %s payload: %w", HookRunPrepare, err)
 		}
 	}
-	if !settings.Enabled || strings.TrimSpace(payload.Repo) == "" {
+	if !settings.Enabled || strings.TrimSpace(payload.Repo) == "" || !handlesChangeRequest(payload.ChangeRequestProvider) || !isGitRepo(payload.Repo) {
 		return &peggplugin.HookResult{Handled: false}, nil
 	}
 
@@ -188,7 +228,7 @@ func hookCardSucceeded(settings Settings, req peggplugin.HookRequest) (*peggplug
 			return nil, fmt.Errorf("decode %s payload: %w", HookCardSucceeded, err)
 		}
 	}
-	if !settings.Enabled || !payload.CreateChangeRequest {
+	if !settings.Enabled || !payload.CreateChangeRequest || !handlesChangeRequest(payload.ChangeRequestProvider) {
 		return &peggplugin.HookResult{Handled: false}, nil
 	}
 
@@ -323,6 +363,23 @@ func changeRequestBody(body, summary string) string {
 	default:
 		return body + "\n\n" + summary
 	}
+}
+
+func handlesChangeRequest(provider string) bool {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return true
+	}
+	return strings.EqualFold(provider, pluginName)
+}
+
+func isGitRepo(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	_, err := gitOutput(path, "rev-parse", "--show-toplevel")
+	return err == nil
 }
 
 func hookContext(req peggplugin.HookRequest, settings Settings) (context.Context, context.CancelFunc) {

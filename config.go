@@ -21,22 +21,23 @@ const (
 )
 
 type Settings struct {
-	Enabled               bool   `json:"enabled"`
-	Kind                  string `json:"kind"`
-	BaseURL               string `json:"base_url"`
-	Workspace             string `json:"workspace"`
-	Project               string `json:"project"`
-	Repo                  string `json:"repo"`
-	Email                 string `json:"email"`
-	APIToken              string `json:"api_token"`
-	AccessToken           string `json:"access_token"`
-	Username              string `json:"username"`
-	Password              string `json:"password"`
-	Token                 string `json:"token"`
-	DefaultBase           string `json:"default_base"`
-	WorktreeRoot          string `json:"worktree_root"`
-	RequestTimeoutSeconds int    `json:"request_timeout_seconds"`
-	Workdir               string `json:"-"`
+	Enabled               bool     `json:"enabled"`
+	Kind                  string   `json:"kind"`
+	BaseURL               string   `json:"base_url"`
+	Workspace             string   `json:"workspace"`
+	Project               string   `json:"project"`
+	Repo                  string   `json:"repo"`
+	Email                 string   `json:"email"`
+	APIToken              string   `json:"api_token"`
+	AccessToken           string   `json:"access_token"`
+	Username              string   `json:"username"`
+	Password              string   `json:"password"`
+	Token                 string   `json:"token"`
+	DefaultBase           string   `json:"default_base"`
+	WorktreeRoot          string   `json:"worktree_root"`
+	IssueProviders        []string `json:"issue_providers"`
+	RequestTimeoutSeconds int      `json:"request_timeout_seconds"`
+	Workdir               string   `json:"-"`
 }
 
 func defaultSettings() Settings {
@@ -46,6 +47,7 @@ func defaultSettings() Settings {
 		Kind:                  kindCloud,
 		BaseURL:               defaultCloudBaseURL,
 		WorktreeRoot:          defaultWorktreeRoot,
+		IssueProviders:        []string{"jira"},
 		RequestTimeoutSeconds: defaultTimeout,
 		Workdir:               wd,
 	}
@@ -124,6 +126,9 @@ func (s *Settings) applyEnv() {
 	if v := strings.TrimSpace(os.Getenv("PEGG_BITBUCKET_DEFAULT_BASE")); v != "" {
 		s.DefaultBase = v
 	}
+	if v := strings.TrimSpace(os.Getenv("PEGG_BITBUCKET_ISSUE_PROVIDERS")); v != "" {
+		s.IssueProviders = parseStringList(v)
+	}
 	if v := strings.TrimSpace(os.Getenv("PEGG_BITBUCKET_WORKTREE_ROOT")); v != "" {
 		s.WorktreeRoot = v
 	}
@@ -148,6 +153,7 @@ func (s *Settings) normalize() {
 	s.Password = strings.TrimSpace(s.Password)
 	s.Token = strings.TrimSpace(s.Token)
 	s.DefaultBase = strings.TrimSpace(s.DefaultBase)
+	s.IssueProviders = cleanStrings(s.IssueProviders)
 	if strings.TrimSpace(s.WorktreeRoot) == "" {
 		s.WorktreeRoot = defaultWorktreeRoot
 	}
@@ -218,6 +224,24 @@ func expandHome(path string) string {
 		}
 	}
 	return path
+}
+
+func parseStringList(value string) []string {
+	var values []string
+	if err := json.Unmarshal([]byte(value), &values); err == nil {
+		return cleanStrings(values)
+	}
+	return cleanStrings(strings.Split(value, ","))
+}
+
+func cleanStrings(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.ToLower(strings.TrimSpace(value)); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func redactSettings(msg string, s Settings) string {
